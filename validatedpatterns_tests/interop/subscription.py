@@ -122,8 +122,8 @@ def subscription_status(openshift_dyn_client, expected_subs, diff):
 
         if checkpath is True:
             logger.info("Diff current operator list with previous file")
-            diff = opdiff(open(previouspath).readlines(), open(currentfile).readlines())
-            diffstring = "".join(diff)
+            odiff = opdiff(open(previouspath).readlines(), open(currentfile).readlines())
+            diffstring = "".join(odiff)
             logger.info(diffstring)
 
             logger.info("Write diff to file")
