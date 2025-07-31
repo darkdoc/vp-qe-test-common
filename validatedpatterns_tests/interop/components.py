@@ -7,7 +7,7 @@ import yaml
 
 from ocp_resources.namespace import Namespace
 from ocp_resources.pipeline import Pipeline
-from ocp_resources.pipelineruns import PipelineRun
+from ocp_resources.pipeline_run import PipelineRun
 from ocp_resources.task_run import TaskRun
 from ocp_resources.pod import Pod
 from openshift.dynamic.exceptions import NotFoundError
