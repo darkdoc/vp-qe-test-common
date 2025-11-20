@@ -1,0 +1,24 @@
+[project]
+name = "vp-qe-test-common"
+version = "0.0.1"
+description = "QE Test Common for Validated Patterns"
+readme = "README.md"
+license = "GPL-3.0"
+requires-python = ">=3.6"
+authors = [
+    { name = "Multi Product Quality Engineering", email = "mps-qe@redhat.com" },
+]
+
+dependencies = [
+    "openshift",
+    "openshift-python-wrapper",
+    "pytest",
+    "pyyaml",
+]
+
+[project.scripts]
+runtime-data = "vp-qe-test-common.tools.runtime_data:cli"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
