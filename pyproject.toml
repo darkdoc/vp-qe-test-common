@@ -16,9 +16,6 @@ dependencies = [
     "pyyaml",
 ]
 
-[project.scripts]
-runtime-data = "vp-qe-test-common.tools.runtime_data:cli"
-
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
