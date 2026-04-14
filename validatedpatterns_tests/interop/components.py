@@ -155,7 +155,7 @@ def check_pod_status(openshift_dyn_client, projects, skip_check=""):
 
 
 def validate_site_reachable(kube_config, openshift_dyn_client):
-    namespace = "openshift-gitops"
+    namespace = "vp-gitops"
     sub_string = "argocd-dex-server-token"
 
     api_url = application.get_site_api_url(kube_config)
@@ -173,9 +173,10 @@ def validate_site_reachable(kube_config, openshift_dyn_client):
 
 
 def validate_argocd_reachable(openshift_dyn_client):
-    namespace = "openshift-gitops"
-    name = "openshift-gitops-server"
+    namespace = "vp-gitops"
+    name = "vp-gitops-server"
     sub_string = "argocd-dex-server-token"
+
     logger.info("Check if argocd route/url on hub site is reachable")
     try:
         argocd_route_url = application.get_argocd_route_url(
