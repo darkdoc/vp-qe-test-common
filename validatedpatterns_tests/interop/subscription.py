@@ -83,8 +83,8 @@ def subscription_status(openshift_dyn_client, expected_subs, diff):
             f"FAIL: The install plan for the following subscriptions is missing: {missing_installplans}"
         )
     if upgrades_pending:
-        logger.error(
-            f"FAIL: The following subscriptions are in UpgradePending state: {upgrades_pending}"
+        logger.warning(
+            f"WARNING: The following subscriptions are in UpgradePending state: {upgrades_pending}"
         )
 
     cluster_version = openshift_version(openshift_dyn_client)
