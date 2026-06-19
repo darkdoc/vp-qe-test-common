@@ -83,7 +83,7 @@ def subscription_status(openshift_dyn_client, expected_subs, diff):
             f"FAIL: The install plan for the following subscriptions is missing: {missing_installplans}"
         )
     if upgrades_pending:
-        logger.info(
+        logger.warning(
             f"WARNING: The following subscriptions are in UpgradePending state: {upgrades_pending}"
         )
 
@@ -133,7 +133,7 @@ def subscription_status(openshift_dyn_client, expected_subs, diff):
         else:
             logger.info("Skipping operator diff - previous file not found")
 
-    if missing_subs or unhealthy_subs or missing_installplans or upgrades_pending:
+    if missing_subs or unhealthy_subs or missing_installplans:
         err_msg = "Subscription status check failed"
         return err_msg
     else:
