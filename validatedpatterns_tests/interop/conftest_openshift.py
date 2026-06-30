@@ -2,41 +2,22 @@ import os
 
 import pytest
 from kubernetes import config
-from kubernetes.client import Configuration
+from kubernetes.config.config_exception import ConfigException
 from openshift.dynamic import DynamicClient
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--kubeconfig",
-        action="store",
-        default=None,
-        help="The full path to the kubeconfig file to be used",
-    )
+@pytest.fixture
+def openshift_dyn_client(request):
+    env_var = request.param
 
+    kubeconfig = os.getenv(env_var)
+    if not kubeconfig:
+        pytest.fail(f"Environment variable '{env_var}' is not set.")
 
-@pytest.fixture(scope="session")
-def get_kubeconfig(request):
-    if request.config.getoption("--kubeconfig"):
-        k8config = request.config.getoption("--kubeconfig")
-    elif "KUBECONFIG" in os.environ.keys() and os.environ["KUBECONFIG"]:
-        k8config = os.environ["KUBECONFIG"]
-    else:
-        raise ValueError(
-            "A kubeconfig file was not provided. Please provide one either "
-            "via the --kubeconfig command option or by setting a KUBECONFIG "
-            "environment variable"
-        )
-    return k8config
+    if not os.path.isfile(kubeconfig):
+        pytest.fail(f"Kubeconfig file '{kubeconfig}' does not exist.")
 
-
-@pytest.fixture(scope="session")
-def kube_config(get_kubeconfig):
-    kc = Configuration()
-    config.load_kube_config(config_file=get_kubeconfig, client_configuration=kc)
-    return kc
-
-
-@pytest.fixture(scope="session")
-def openshift_dyn_client(get_kubeconfig):
-    return DynamicClient(client=config.new_client_from_config(get_kubeconfig))
+    try:
+        return DynamicClient(client=config.new_client_from_config(kubeconfig))
+    except ConfigException as exc:
+        pytest.fail(f"Failed to load kubeconfig '{kubeconfig}': {exc}")
