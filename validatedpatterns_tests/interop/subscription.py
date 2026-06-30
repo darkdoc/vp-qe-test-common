@@ -1,163 +1,71 @@
-import difflib
 import logging
-import os
-import re
-import subprocess
 
-from ocp_resources.cluster_version import ClusterVersion
+
 from ocp_resources.subscription import Subscription
 from openshift.dynamic.exceptions import NotFoundError
+from openshift.dynamic import DynamicClient
 
 from . import __loggername__
 
 logger = logging.getLogger(__loggername__)
 
 
-def openshift_version(openshift_dyn_client):
-    versions = ClusterVersion.get(dyn_client=openshift_dyn_client)
-    version = next(versions)
-    logger.info(f"Openshift version:\n{version.instance.status.history}")
+def assert_subscription_status(
+    openshift_dyn_client: DynamicClient, expected_subs: dict[str, list[str]]
+):
+    """
+    Assert if the expected subs are present in the given namespaces of the cluster, reached with dynamic client
 
-    return version
-
-
-def subscription_status(openshift_dyn_client, expected_subs, diff):
-    operator_versions = []
+    :param openshift_dyn_client: The openshift DynamicClient to connect to the cluster
+    :param expected_subs: A dict of the expected subscriptions with the list of namespaces to expect them in
+    """
     missing_subs = []
     unhealthy_subs = []
     missing_installplans = []
     upgrades_pending = []
 
-    for key in expected_subs.keys():
-        for val in expected_subs[key]:
+    for subscription in expected_subs.keys():
+        for namespace in expected_subs[subscription]:
             try:
                 subs = Subscription.get(
-                    dyn_client=openshift_dyn_client, name=key, namespace=val
+                    dyn_client=openshift_dyn_client,
+                    name=subscription,
+                    namespace=namespace,
                 )
                 sub = next(subs)
             except NotFoundError:
-                missing_subs.append(f"{key} in {val} namespace")
+                missing_subs.append(f"{subscription} in {namespace} namespace")
                 continue
 
-            logger.info(
-                f"State for {sub.instance.metadata.name}: {sub.instance.status.state}"
-            )
             if sub.instance.status.state == "UpgradePending":
                 upgrades_pending.append(
                     f"{sub.instance.metadata.name} in {sub.instance.metadata.namespace} namespace"
                 )
 
-            logger.info(
-                f"CatalogSourcesUnhealthy: {sub.instance.status.conditions[0].status}"
-            )
             if sub.instance.status.conditions[0].status != "False":
-                logger.info(f"Subscription {sub.instance.metadata.name} is unhealthy")
                 unhealthy_subs.append(
                     f"{sub.instance.metadata.name} in {sub.instance.metadata.namespace} namespace"
                 )
-            else:
-                operator_versions.append(
-                    f"installedCSV: {sub.instance.status.installedCSV}"
-                )
 
-            logger.info(f"installPlanRef: {sub.instance.status.installPlanRef}")
             if not sub.instance.status.installPlanRef:
-                logger.info(
-                    f"No install plan found for subscription {sub.instance.metadata.name} "
-                    f"in {sub.instance.metadata.namespace} namespace"
-                )
                 missing_installplans.append(
                     f"{sub.instance.metadata.name} in {sub.instance.metadata.namespace} namespace"
                 )
 
-            logger.info("")
-
-    if missing_subs:
-        logger.error(f"FAIL: The following subscriptions are missing: {missing_subs}")
-    if unhealthy_subs:
-        logger.error(
-            f"FAIL: The following subscriptions are unhealthy: {unhealthy_subs}"
-        )
-    if missing_installplans:
-        logger.error(
-            f"FAIL: The install plan for the following subscriptions is missing: {missing_installplans}"
-        )
     if upgrades_pending:
         logger.warning(
             f"WARNING: The following subscriptions are in UpgradePending state: {upgrades_pending}"
         )
 
-    cluster_version = openshift_version(openshift_dyn_client)
-    logger.info(f"Openshift version:\n{cluster_version.instance.status.history}")
+    errors = []
 
-    if (os.getenv("EXTERNAL_TEST") != "true") and (diff == True):
-        shortversion = re.sub("(.[0-9]+$)", "", os.getenv("OPENSHIFT_VER"))
-        currentfile = os.getcwd() + "/operators_hub_current"
-        sourceFile = open(currentfile, "w")
-        for line in operator_versions:
-            logger.info(line)
-            print(line, file=sourceFile)
-        sourceFile.close()
+    if missing_subs:
+        errors.append(f"Missing subscriptions: {', '.join(missing_subs)}")
 
-        logger.info("Clone operator-versions repo")
-        try:
-            operator_versions_repo = (
-                "git@gitlab.cee.redhat.com:mpqe/mps/vp/operator-versions.git"
-            )
-            clone = subprocess.run(
-                ["git", "clone", operator_versions_repo], capture_output=True, text=True
-            )
-            logger.info(clone.stdout)
-            logger.info(clone.stderr)
-        except Exception:
-            pass
+    if unhealthy_subs:
+        errors.append(f"Unhealthy subscriptions: {', '.join(unhealthy_subs)}")
 
-        pattern = os.getenv("PATTERN_SHORTNAME")
-        previouspath = os.getcwd() + f"/operator-versions/{pattern}_hub_{shortversion}"
-        previousfile = f"{pattern}_hub_{shortversion}"
+    if missing_installplans:
+        errors.append(f"Missing install plans: {', '.join(missing_installplans)}")
 
-        logger.info("Ensure previous file exists")
-        checkpath = os.path.exists(previouspath)
-        logger.info(checkpath)
-
-        if checkpath is True:
-            logger.info("Diff current operator list with previous file")
-            odiff = opdiff(open(previouspath).readlines(), open(currentfile).readlines())
-            diffstring = "".join(odiff)
-            logger.info(diffstring)
-
-            logger.info("Write diff to file")
-            sourceFile = open("operator_diffs_hub.log", "w")
-            print(diffstring, file=sourceFile)
-            sourceFile.close()
-        else:
-            logger.info("Skipping operator diff - previous file not found")
-
-    if missing_subs or unhealthy_subs or missing_installplans:
-        err_msg = "Subscription status check failed"
-        return err_msg
-    else:
-        # Only push the new operarator list if the test passed
-        # and we are not testing a pre-release operator nor
-        # running externally
-        if (os.getenv("EXTERNAL_TEST") != "true") and (diff == True):
-            if checkpath is True and not os.environ["INDEX_IMAGE"]:
-                os.remove(previouspath)
-                os.rename(currentfile, previouspath)
-
-                cwd = os.getcwd() + "/operator-versions"
-                logger.info(f"CWD: {cwd}")
-
-                logger.info("Push new operator list")
-                subprocess.run(["git", "add", previousfile], cwd=cwd)
-                subprocess.run(
-                    ["git", "commit", "-m", "Update operator versions list"],
-                    cwd=cwd,
-                )
-                subprocess.run(["git", "push"], cwd=cwd)
-
-        return None
-
-
-def opdiff(*args):
-    return filter(lambda x: not x.startswith(" "), difflib.ndiff(*args))
+    assert errors, "\n".join(errors)
