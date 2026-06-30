@@ -7,12 +7,8 @@ import pytest
 
 from . import __loggername__
 
-if os.getenv("EXTERNAL_TEST") == "true":
-    LOG_DIR = os.path.join(os.environ["WORKSPACE"], ".results/test_execution_logs")
-else:
-    LOG_DIR = os.path.join(
-        os.environ["WORKSPACE"], ".teflo/.results/test_execution_logs"
-    )
+LOG_DIR = os.path.join(os.environ["WORKSPACE"], ".results/test_execution_logs")
+
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -42,10 +38,7 @@ class CSS_Logger(object):
 
             # Create a logging format
             log_formatter = logging.Formatter(
-                "%(asctime)s  "
-                "[%(levelname)s]  "
-                "%(module)s:%(lineno)d  "
-                "%(message)s"
+                "%(asctime)s  [%(levelname)s]  %(module)s:%(lineno)d  %(message)s"
             )
             file_handler.setFormatter(log_formatter)
 

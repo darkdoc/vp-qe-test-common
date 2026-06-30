@@ -17,7 +17,6 @@
 
 """Setuptools (refer to setup.cfg)."""
 
-
 import setuptools
 
 setuptools.setup()
