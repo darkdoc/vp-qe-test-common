@@ -68,4 +68,7 @@ def assert_subscription_status(
     if missing_installplans:
         errors.append(f"Missing install plans: {', '.join(missing_installplans)}")
 
-    assert errors, "\n".join(errors)
+    assert not errors, (
+        "Subscription status check failed:\n"
+        + "\n".join(errors)
+    )

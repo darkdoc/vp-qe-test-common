@@ -1,60 +1,36 @@
 import logging
-import os
 import re
 import subprocess
 import time
-import yaml
 
+from itertools import chain
 from ocp_resources.namespace import Namespace
 from ocp_resources.pipeline import Pipeline
 from ocp_resources.pipeline_run import PipelineRun
 from ocp_resources.task_run import TaskRun
 from ocp_resources.pod import Pod
+from openshift.dynamic import DynamicClient
 from openshift.dynamic.exceptions import NotFoundError
 
 from validatedpatterns_tests.interop import application
 from validatedpatterns_tests.interop.crd import ManagedCluster
+from validatedpatterns_tests.interop.edge_util import (
+    get_long_live_bearer_token,
+    get_site_response,
+)
 
 from . import __loggername__
 
 logger = logging.getLogger(__loggername__)
 
-oc = os.environ["HOME"] + "/oc_client/oc"
 
+def get_missing_projects(
+    openshift_dyn_client: DynamicClient, projects: list[str]
+) -> list[str]:
+    """
+    Return missing projects from project list
 
-def dump_openshift_version():
-    version_out = subprocess.run(["oc", "version"], capture_output=True)
-    version_out = version_out.stdout.decode("utf-8")
-    return version_out
-
-
-def dump_pvc():
-    pvcs_out = subprocess.run(["oc", "get", "pvc", "-A"], capture_output=True)
-    pvcs_out = pvcs_out.stdout.decode("utf-8")
-    return pvcs_out
-
-
-def describe_pod(project, pod):
-    cmd_out = subprocess.run(
-        [oc, "describe", "pod", "-n", project, pod], capture_output=True
-    )
-    if cmd_out.stdout:
-        return cmd_out.stdout.decode("utf-8")
-    else:
-        assert False, cmd_out.stderr
-
-
-def get_log_output(project, pod, container):
-    cmd_out = subprocess.run(
-        [oc, "logs", "-n", project, pod, "-c", container], capture_output=True
-    )
-    if cmd_out.stdout:
-        return cmd_out.stdout.decode("utf-8")
-    else:
-        assert False, cmd_out.stderr
-
-
-def check_project_absence(openshift_dyn_client, projects):
+    """
     missing_projects = []
 
     for project in projects:
@@ -69,174 +45,138 @@ def check_project_absence(openshift_dyn_client, projects):
     return missing_projects
 
 
-def check_pod_absence(openshift_dyn_client, project):
-    # Check for absence of pods in project
-    missing_pods = []
-    try:
-        pods = Pod.get(dyn_client=openshift_dyn_client, namespace=project)
-        next(pods)
-    except StopIteration:
-        missing_pods.append(project)
-    return missing_pods
+def is_project_empty(openshift_dyn_client: DynamicClient, project: str) -> bool:
+    """
+    Check for absence of pods in a project
+    """
+    pods = Pod.get(dyn_client=openshift_dyn_client, namespace=project)
+
+    first_pod = next(pods, None)
+    if first_pod is None:
+        return True
+    return False
 
 
-def check_pod_status(openshift_dyn_client, projects, skip_check=""):
-    missing_projects = check_project_absence(openshift_dyn_client, projects)
-    missing_pods = []
-    failed_pods = []
-    err_msg = []
+def assert_pod_status(
+    openshift_dyn_client: DynamicClient, projects: list[str], skip_check: list[str] = []
+):
+    missing_projects = get_missing_projects(openshift_dyn_client, projects)
+    empty_projects = []
+    failed_pods = set()
 
     for project in projects:
-        logger.info(f"Checking pods in namespace '{project}'")
-        missing_pods += check_pod_absence(openshift_dyn_client, project)
+        if is_project_empty(openshift_dyn_client, project=project):
+            empty_projects.append(project)
+            continue
+
         pods = Pod.get(dyn_client=openshift_dyn_client, namespace=project)
+
         for pod in pods:
-            flag = ""
-            if skip_check:
-                for skip in skip_check:
-                    if skip in pod.instance.metadata.name:
-                        logger.info(f"Skipping: {pod.instance.metadata.name}")
-                        flag = "skipped"
-                        break
-
-            if flag == "skipped":
+            if any(name in pod.instance.metadata.name for name in skip_check):
                 continue
-
-            for container in pod.instance.status.containerStatuses:
-                logger.info(
-                    f"{pod.instance.metadata.name} : {container.name} :"
-                    f" {container.state}"
+            # Check if any of the containers are waiting (incl. CrashLoopBackOff, ImagePullBackOff) or completed with errored
+            if any(
+                (
+                    container.state.waiting
+                    or (
+                        container.state.terminated
+                        and container.state.terminated.reason != "Completed"
+                    )
                 )
-                if container.state.terminated:
-                    if container.state.terminated.reason != "Completed":
-                        logger.info(
-                            f"Pod {pod.instance.metadata.name} in"
-                            f" {pod.instance.metadata.namespace} namespace is"
-                            " FAILED:"
-                        )
-                        failed_pods.append(pod.instance.metadata.name)
-                        logger.info(describe_pod(project, pod.instance.metadata.name))
-                        logger.info(
-                            get_log_output(
-                                project,
-                                pod.instance.metadata.name,
-                                container.name,
-                            )
-                        )
-                elif not container.state.running:
-                    logger.info(
-                        f"Pod {pod.instance.metadata.name} in"
-                        f" {pod.instance.metadata.namespace} namespace is"
-                        " FAILED:"
-                    )
-                    failed_pods.append(pod.instance.metadata.name)
-                    logger.info(describe_pod(project, pod.instance.metadata.name))
-                    logger.info(
-                        get_log_output(
-                            project, pod.instance.metadata.name, container.name
-                        )
-                    )
+                for container in chain(
+                    pod.instance.status.containerStatuses or [],
+                    pod.instance.status.initContainerStatuses or [],
+                )
+            ):
+                failed_pods.add(
+                    f"{pod.instance.metadata.namespace}/{pod.instance.metadata.name}"
+                )
+
+    errors = []
 
     if missing_projects:
-        err_msg.append(f"The following namespaces are missing: {missing_projects}")
+        errors.append(
+            f"The following namespaces are missing: {', '.join(missing_projects)}"
+        )
 
-    if missing_pods:
-        err_msg.append(
-            f"The following namespaces have no pods deployed: {missing_pods}"
+    if empty_projects:
+        errors.append(
+            f"The following namespaces have no pods deployed: {', '.join(empty_projects)}"
         )
 
     if failed_pods:
-        err_msg.append(f"The following pods are failed: {failed_pods}")
+        errors.append(
+            f"The following pods are failed (ns/podname): {', '.join(failed_pods)}"
+        )
 
-    if err_msg:
-        return False, err_msg
-    else:
-        return None
+    assert not errors, "\n".join(errors)
 
 
-def validate_site_reachable(kube_config, openshift_dyn_client):
+def assert_site_reachable(openshift_dyn_client: DynamicClient):
     namespace = "vp-gitops"
     sub_string = "argocd-dex-server-token"
 
-    api_url = application.get_site_api_url(kube_config)
-    api_response = application.get_site_api_response(
-        openshift_dyn_client, api_url, namespace, sub_string
+    api_url = application.get_site_api_url(openshift_dyn_client)
+
+    bearer_token = get_long_live_bearer_token(
+        openshift_dyn_client=openshift_dyn_client,
+        namespace=namespace,
+        sub_string=sub_string,
     )
 
-    logger.info(f"Site API response : {api_response}")
+    api_response = get_site_response(site_url=api_url, bearer_token=bearer_token)
 
-    if api_response.status_code != 200:
-        err_msg = "Site is not reachable. Please check the deployment."
-        return False, err_msg
-    else:
-        return None
+    assert api_response.status_code == 200, (
+        f"Site is not reachable (HTTP {api_response.status_code}). URL: {api_url}"
+    )
 
 
-def validate_argocd_reachable(openshift_dyn_client):
+def assert_argocd_reachable(openshift_dyn_client: DynamicClient):
     namespace = "vp-gitops"
     name = "vp-gitops-server"
     sub_string = "argocd-dex-server-token"
 
-    logger.info("Check if argocd route/url on hub site is reachable")
-    try:
-        argocd_route_url = application.get_argocd_route_url(
-            openshift_dyn_client, namespace, name
+    argocd_route_url = application.get_argocd_route_url(
+        openshift_dyn_client, namespace, name
+    )
+    bearer_token = get_long_live_bearer_token(
+        openshift_dyn_client=openshift_dyn_client,
+        namespace=namespace,
+        sub_string=sub_string,
+    )
+
+    argocd_route_response = get_site_response(
+        site_url=argocd_route_url, bearer_token=bearer_token
+    )
+
+    assert argocd_route_response.status_code == 200, (
+        f"Argocd is not reachable. Please check the deployment. (HTTP {argocd_route_response.status_code}). "
+        f"URL: {argocd_route_url}"
+    )
+
+
+def assert_managed_clusters(
+    openshift_dyn_client: DynamicClient, managed_cluster_clustergroups: list[str]
+):
+    not_joined_clusters = []
+    for clustergroup in managed_cluster_clustergroups:
+        clusters = ManagedCluster.get(
+            dyn_client=openshift_dyn_client,
+            label_selector=f"clusterGroup={clustergroup}",
         )
-        argocd_route_response = application.get_site_api_response(
-            openshift_dyn_client, argocd_route_url, namespace, sub_string
-        )
-    except StopIteration:
-        err_msg = "Argocd url/route is missing in open-cluster-management namespace"
-        assert False, err_msg
 
-    logger.info(f"Argocd route response : {argocd_route_response}")
+        for cluster in clusters:
+            is_managed_cluster_joined, managed_cluster_status = cluster.self_registered
 
-    if argocd_route_response.status_code != 200:
-        err_msg = "Argocd is not reachable. Please check the deployment"
-        return False, err_msg
-    else:
-        return None
+            if not is_managed_cluster_joined:
+                not_joined_clusters.append(
+                    f"{cluster.name} is not self registered, status: {managed_cluster_status}"
+                )
 
-
-def validate_acm_self_registration_managed_clusters(openshift_dyn_client, kubefiles):
-    err_msg = []
-    for kubefile in kubefiles:
-        kubefile_exp = os.path.expandvars(kubefile)
-        with open(kubefile_exp) as stream:
-            try:
-                out = yaml.safe_load(stream)
-                site_name = out["clusters"][0]["name"]
-            except yaml.YAMLError:
-                err_msg = "Failed to load kubeconfig file"
-                assert False, err_msg
-
-        logger.info(f"site_name: {site_name}")
-
-        # Clusters provisioned with hcp will show name as "cluster" in kubeconfig
-        # Check "server" value instead
-        if site_name == "cluster":
-            site_name = out["clusters"][0]["cluster"]["server"]
-            logger.info(f"server: {site_name}")
-            clusters = ManagedCluster.get(
-                dyn_client=openshift_dyn_client, server=site_name
-            )
-        else:
-            clusters = ManagedCluster.get(
-                dyn_client=openshift_dyn_client, name=site_name
-            )
-
-        cluster = next(clusters)
-        is_managed_cluster_joined, managed_cluster_status = cluster.self_registered
-
-        logger.info(f"Cluster Managed : {is_managed_cluster_joined}")
-        logger.info(f"Managed Cluster Status : {managed_cluster_status}")
-
-        if not is_managed_cluster_joined:
-            err_msg += f"{site_name} is not self registered"
-        else:
-            return None
-
-    return err_msg
+    assert not not_joined_clusters, (
+        "The following managed clusters are not self registered:\n"
+        + "\n".join(not_joined_clusters)
+)
 
 
 def validate_pipelineruns(
@@ -372,7 +312,7 @@ def validate_pipelineruns(
                     cmdstring = re.search("for logs run: kubectl(.*)$", message).group(
                         1
                     )
-                    cmd = str(oc + cmdstring)
+                    cmd = str("oc" + cmdstring)
                     logger.info(f"CMD: {cmd}")
                     cmd_out = subprocess.run(cmd, shell=True, capture_output=True)
 

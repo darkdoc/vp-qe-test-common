@@ -1,127 +1,85 @@
 import logging
-import os
 
 from ocp_resources.route import Route
+from openshift.dynamic import DynamicClient
+from kubernetes.dynamic.exceptions import NotFoundError
+
 
 from . import __loggername__
 from .crd import ArgoCD
-from .edge_util import get_long_live_bearer_token, get_site_response
+
 
 logger = logging.getLogger(__loggername__)
 
 
-def get_site_api_url(kube_config):
-    hub_api_url = kube_config.host
-    if not hub_api_url:
-        err_msg = "Hub site url is missing in kubeconfig file"
-        assert False, err_msg
-    else:
-        logger.info(f"HUB api url : {hub_api_url}")
-        return hub_api_url
+def get_site_api_url(openshift_dyn_client: DynamicClient) -> str:
+    """
+    Return the host url from dynamic client configuration
+
+    :param openshift_dyn_client: The openshift DynamicClient to connect to the cluster
+    """
+    if not openshift_dyn_client.configuration.host:
+        raise RuntimeError("Hub site url is missing in kubeconfig file")
+    return openshift_dyn_client.configuration.host
 
 
-def get_site_api_response(openshift_dyn_client, site_api_url, project, sub_string):
-    bearer_token = get_long_live_bearer_token(
-        dyn_client=openshift_dyn_client,
-        namespace=project,
-        sub_string=sub_string,
-    )
+def get_argocd_route_url(
+    openshift_dyn_client: DynamicClient, namespace: str, name: str
+) -> str:
+    """
+    Return the url of a route
 
-    if not bearer_token:
-        err_msg = "Bearer token is missing for {}".format(sub_string)
-        assert False, err_msg
-    else:
-        logger.debug(f"Site bearer token : {bearer_token}")
-
-    site_api_response = get_site_response(
-        site_url=site_api_url, bearer_token=bearer_token
-    )
-
-    return site_api_response
-
-
-def get_argocd_route_url(openshift_dyn_client, project, name):
+    :param openshift_dyn_client: The openshift DynamicClient to connect to the cluster
+    :param namespace: The namespace to find the route
+    :param name: The name of the route
+    :return url: The url of the route, prefixed with http
+    """
     try:
-        for route in Route.get(
-            dyn_client=openshift_dyn_client,
-            namespace=project,
-            name=name,
-        ):
-            argocd_route_url = route.instance.spec.host
-    except StopIteration:
-        raise
+        route = next(
+            Route.get(
+                dyn_client=openshift_dyn_client,
+                namespace=namespace,
+                name=name,
+            )
+        )
+    except NotFoundError:
+        raise RuntimeError(f"Route '{name}' was not found in namespace '{namespace}'.")
 
-    final_argocd_url = f"{'http://'}{argocd_route_url}"
-    logger.info(f"ACM route/url : {final_argocd_url}")
+    url = f"http://{route.instance.spec.host}"
 
-    return final_argocd_url
+    return url
 
 
-def get_argocd_application_status(openshift_dyn_client, projects):
+def assert_argocd_applications(openshift_dyn_client, projects):
     unhealthy_apps = []
 
     for project in projects:
-        for app in ArgoCD.get(dyn_client=openshift_dyn_client, namespace=project):
+        for app in ArgoCD.get(
+            dyn_client=openshift_dyn_client,
+            namespace=project,
+        ):
             app_name = app.instance.metadata.name
             app_health = app.instance.status.health.status
             app_sync = app.instance.status.sync.status
 
-            logger.info(f"Status for {app_name} : {app_health} : {app_sync}")
+            if app_health != "Healthy" or app_sync != "Synced":
+                details = [f"{app_name}: health={app_health}, sync={app_sync}"]
 
-            if "Healthy" != app_health or "Synced" != app_sync:
-                logger.info(f"Dumping failed resources for app: {app_name}")
-                unhealthy_apps.append(app_name)
-                try:
-                    for res in app.instance.status.resources:
-                        if (
-                            res.health and res.health.status != "Healthy"
-                        ) or res.status != "Synced":
-                            logger.info(f"\n{res}")
-                except TypeError:
-                    logger.info(f"No resources found for app: {app_name}")
+                resources = getattr(app.instance.status, "resources", None)
+                if resources:
+                    for res in resources:
+                        health = getattr(getattr(res, "health", None), "status", "N/A")
+                        sync = getattr(res, "status", "Unknown")
 
-    return unhealthy_apps
+                        if health != "Healthy" or sync != "Synced":
+                            details.append(
+                                f"  - {res.kind}/{res.name}: health={health}, sync={sync}"
+                            )
+                else:
+                    details.append("  - No resources found for app")
+                unhealthy_apps.append("\n".join(details))
 
-
-def validate_argocd_application_values(openshift_dyn_client, projects):
-    unhealthy_apps = []
-
-    for project in projects:
-        for app in ArgoCD.get(dyn_client=openshift_dyn_client, namespace=project):
-            app_name = app.instance.metadata.name
-            logger.info(f"name: {app_name}")
-            if app_name == "config-demo" or app_name == "hello-world":
-                app_targetRepo = app.instance.status.sync.comparedTo.source.repoURL
-                app_targetRevision = (
-                    app.instance.status.sync.comparedTo.source.targetRevision
-                )
-            else:
-                app_targetRepo = app.instance.status.sync.comparedTo.sources[0].repoURL
-                app_targetRevision = app.instance.status.sync.comparedTo.sources[
-                    0
-                ].targetRevision
-
-            expected_targetRepo = (
-                "https://github.com/"
-                + os.getenv("MYGITHUBORG")
-                + "/"
-                + os.getenv("VALIDATED_PATTERNS_REPO")
-                + ".git"
-            )
-            expected_targetRevision = (
-                os.getenv("OPERATOR_TEST_BRANCH") + "-" + os.getenv("MPTS_TEST_RUN_ID")
-            )
-
-            if expected_targetRevision != app_targetRevision:
-                logger.info(
-                    f"targetRevision not matched\nexpected: {expected_targetRevision}\nactual: {app_targetRevision}"
-                )
-                unhealthy_apps.append(app_name)
-
-            elif expected_targetRepo != app_targetRepo:
-                logger.info(
-                    f"targetRepo not matched\nexpected: {expected_targetRepo}\nactual: {app_targetRepo}"
-                )
-                unhealthy_apps.append(app_name)
-
-    return unhealthy_apps
+    assert not unhealthy_apps, (
+        "The following Argo CD applications are unhealthy:\n\n"
+        + "\n\n".join(unhealthy_apps)
+    )
