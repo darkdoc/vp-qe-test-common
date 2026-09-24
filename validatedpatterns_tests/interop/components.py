@@ -112,8 +112,7 @@ def assert_pod_status(
     assert not errors, "\n".join(errors)
 
 
-def assert_site_reachable(openshift_dyn_client: DynamicClient):
-    namespace = "vp-gitops"
+def assert_site_reachable(openshift_dyn_client: DynamicClient, namespace="vp-gitops"):
     sub_string = "argocd-dex-server-token"
 
     api_url = application.get_site_api_url(openshift_dyn_client)
@@ -131,13 +130,12 @@ def assert_site_reachable(openshift_dyn_client: DynamicClient):
     )
 
 
-def assert_argocd_reachable(openshift_dyn_client: DynamicClient):
-    namespace = "vp-gitops"
-    name = "vp-gitops-server"
+def assert_argocd_reachable(openshift_dyn_client: DynamicClient, namespace="vp-gitops", name="vp-gitops"):
+    route_name=f"{name}-server"
     sub_string = "argocd-dex-server-token"
 
     argocd_route_url = application.get_argocd_route_url(
-        openshift_dyn_client, namespace, name
+        openshift_dyn_client, namespace, route_name
     )
     bearer_token = get_long_live_bearer_token(
         openshift_dyn_client=openshift_dyn_client,
